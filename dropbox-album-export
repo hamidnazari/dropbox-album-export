@@ -1,0 +1,128 @@
+#!/usr/bin/env ruby
+
+require 'ostruct'
+require 'nokogiri'
+require 'optparse'
+require 'open-uri'
+
+VERSION = '1.0'
+CACHE_DIR = '.cache'
+OUTPUT_DIR = './album'
+
+$options = OpenStruct.new
+$options.album_share_link = nil
+$options.output_dir = OUTPUT_DIR
+$options.quiet = false
+$options.invalidate_cache = false
+
+optsparser = OptionParser.new do |opts|
+  opts.banner = 'Usage: %s [options]' % $0
+  opts.separator ''
+
+  opts.on('-l URL', '--link URL', 'Dropbox album share link.') do |link|
+    $options.album_share_link = link
+  end
+
+  opts.on('-o DIR', '--output DIR', "Directory to save the images to, defaults to `#{OUTPUT_DIR}`.") do |dir|
+    $options.output_dir = dir
+  end
+
+  opts.on('-q', '--quiet', 'Runs quietly.') do
+    $options.quiet = true
+  end
+
+  opts.on('-i', '--invalidate-cache', 'Invalidates cache and repulls album.') do
+    $options.invalidate_cache = true
+  end
+
+  opts.on_tail('-v', '--version', 'Shows version number.') do
+    $stdout.puts VERSION
+    exit 0
+  end
+
+  opts.on_tail('-h', '--help', 'Shows this guide.') do
+    $stdout.puts opts
+    exit 0
+  end
+end
+
+begin
+  optsparser.parse!
+
+  raise OptionParser::MissingArgument.new 'Album share link missing.' if $options.album_share_link.nil?
+rescue OptionParser::MissingArgument, OptionParser::InvalidOption => e
+  $stderr.puts e
+  $stderr.puts optsparser
+  exit 64 # EX_USAGE
+end
+
+def echo message, stderr=false
+  return if $options.quiet
+
+  stream = stderr ? $stderr : $stdout
+  stream.puts message
+end
+
+def get_cache_filename url
+  File.join(CACHE_DIR, url.tr('/:', '_'))
+end
+
+def get_cache url
+  if $options.invalidate_cache
+    return nil
+  end
+
+  cache_filename = get_cache_filename(url)
+  unless File.exist? cache_filename
+    return nil
+  end
+
+  File.open(cache_filename, 'r')
+end
+
+def set_cache url, stream
+  Dir.mkdir CACHE_DIR unless Dir.exist? CACHE_DIR
+
+  cache = File.new(get_cache_filename(url), 'w')
+  cache.write(stream.read)
+  stream.rewind
+end
+
+begin
+  source = get_cache $options.album_share_link
+
+  if source.nil?
+    source = open($options.album_share_link)
+    set_cache $options.album_share_link, source
+  end
+
+  html = Nokogiri::HTML(source)
+
+  images = html.css('#gallery-view-media li a')
+
+  if images
+    Dir.mkdir $options.output_dir unless Dir.exist? $options.output_dir
+    i = 0
+
+    images.each do |link|
+      i += 1
+      href = '%s?dl=1' % link['href']
+      request = open(href)
+      filename = request.meta['content-disposition'].match(/(?<=filename=\").*(?=\";)/).to_s
+
+      echo "#{i} of #{images.count}: Downloading `#{filename}`"
+
+      output_path = File.join($options.output_dir, filename)
+
+      unless File.exists? output_path and not $options.invalidate_cache
+        File.open(output_path, 'wb') do |file|
+          file.write(request.read)
+        end
+      end
+    end
+  end
+rescue StandardError => e
+  $stderr.puts e
+rescue Interrupt
+  echo 'Exiting...'
+end
